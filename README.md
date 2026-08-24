@@ -1,4 +1,19 @@
 # xwayland-satellite
+
+> **This is a patched fork of [Supreeeme/xwayland-satellite](https://github.com/Supreeeme/xwayland-satellite).**
+> This branch (`keyboard-grab-forwarding`) adds forwarding of X11 keyboard grabs
+> (`XGrabKeyboard`, used by VMware, VirtualBox, and remote-desktop clients to
+> capture all keyboard input while focused) to the Wayland
+> `keyboard-shortcuts-inhibit-unstable-v1` protocol. Without this, host
+> compositors that implement that protocol (e.g. [niri](https://github.com/niri-wm/niri))
+> have no way to know an X11 client is holding a grab, and keep intercepting
+> their own global keybinds (e.g. `Mod+E`) instead of forwarding keys to the
+> grabbing window. See [upstream issue #220](https://github.com/Supreeeme/xwayland-satellite/issues/220)
+> (open, unfixed as of this writing) and the code in
+> [`src/server/xwayland_keyboard_grab.rs`](src/server/xwayland_keyboard_grab.rs)
+> for details. The `main` branch of this fork is kept in sync with upstream and
+> carries no changes.
+
 xwayland-satellite grants rootless Xwayland integration to any Wayland compositor implementing xdg_wm_base and viewporter.
 This is particularly useful for compositors that (understandably) do not want to go through implementing support for rootless Xwayland themselves.
 
