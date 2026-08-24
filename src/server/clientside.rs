@@ -34,6 +34,10 @@ use wayland_protocols::{
             wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
             wp_fractional_scale_v1::WpFractionalScaleV1,
         },
+        keyboard_shortcuts_inhibit::zv1::client::{
+            zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1,
+            zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1,
+        },
         linux_dmabuf::zv1::client::{
             self as dmabuf,
             zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 as DmabufFeedback,
@@ -196,6 +200,8 @@ delegate_noop!(MyWorld: WlSubsurface);
 delegate_noop!(MyWorld: WpLinuxDrmSyncobjManagerV1);
 delegate_noop!(MyWorld: WpLinuxDrmSyncobjSurfaceV1);
 delegate_noop!(MyWorld: WpLinuxDrmSyncobjTimelineV1);
+delegate_noop!(MyWorld: ZwpKeyboardShortcutsInhibitManagerV1);
+delegate_noop!(MyWorld: ignore ZwpKeyboardShortcutsInhibitorV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for MyWorld {
     fn event(

@@ -5,6 +5,7 @@ mod event;
 pub(crate) mod selection;
 #[cfg(test)]
 mod tests;
+mod xwayland_keyboard_grab;
 
 use self::event::*;
 use crate::xstate::{
@@ -62,8 +63,10 @@ use wayland_protocols::{
         },
         xdg_output::zv1::server::zxdg_output_manager_v1::ZxdgOutputManagerV1,
     },
+    xwayland::keyboard_grab::zv1::server::zwp_xwayland_keyboard_grab_manager_v1::ZwpXwaylandKeyboardGrabManagerV1,
     xwayland::shell::v1::server::xwayland_shell_v1::XwaylandShellV1,
 };
+use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1;
 use wayland_server::protocol::wl_seat::WlSeat;
 use wayland_server::{
     Client, DisplayHandle, Resource, WEnum,
@@ -478,6 +481,7 @@ pub struct InnerServerState<S: X11Selection> {
     viewporter: WpViewporter,
     fractional_scale: Option<WpFractionalScaleManagerV1>,
     decoration_manager: Option<ZxdgDecorationManagerV1>,
+    keyboard_shortcuts_inhibit_manager: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
     selection_states: selection::SelectionStates<S>,
     last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
     activation_state: Option<ActivationState>,
@@ -548,9 +552,19 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             .bind::<ZxdgDecorationManagerV1, _, _>(&qh, 1..=1, ())
             .ok();
 
+        let keyboard_shortcuts_inhibit_manager = global_list
+            .bind::<ZwpKeyboardShortcutsInhibitManagerV1, _, _>(&qh, 1..=1, ())
+            .inspect_err(|e| {
+                warn!(
+                    "Couldn't bind keyboard shortcuts inhibit manager: {e}. XGrabKeyboard from X11 clients (e.g. VMware, VirtualBox) will not be forwarded to the host compositor."
+                )
+            })
+            .ok();
+
         let selection_states = selection::SelectionStates::new(&global_list, &qh);
 
         dh.create_global::<InnerServerState<S>, XwaylandShellV1, _>(1, ());
+        dh.create_global::<InnerServerState<S>, ZwpXwaylandKeyboardGrabManagerV1, _>(1, ());
 
         let mut globals_map = HashMap::new();
         global_list
@@ -596,6 +610,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             new_scale: None,
             current_scale: 1.0,
             decoration_manager,
+            keyboard_shortcuts_inhibit_manager,
             world,
         };
         Self {
