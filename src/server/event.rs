@@ -438,6 +438,7 @@ impl SurfaceEvents {
                             window,
                             output_name: None,
                             is_popup: true,
+                            has_take_focus: window_data.attrs.has_take_focus,
                         });
                     }
                 }
@@ -864,10 +865,13 @@ impl Event for client::wl_keyboard::Event {
                     serial,
                 ));
                 let output_name = get_output_name(output, &state.world);
+                let window_data = data.get::<&WindowData>();
+                let has_take_focus = window_data.as_ref().is_some_and(|d| d.attrs.has_take_focus);
                 state.to_focus = Some(FocusData {
                     window: *window,
                     output_name,
                     is_popup: false,
+                    has_take_focus,
                 });
                 keyboard.enter(serial, surface, keys);
             }
