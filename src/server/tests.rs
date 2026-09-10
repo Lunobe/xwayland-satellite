@@ -160,6 +160,7 @@ struct WindowData {
 #[derive(Default)]
 struct FakeXConnection {
     focused_window: Option<Window>,
+    send_take_focus_window: Option<Window>,
     windows: HashMap<Window, WindowData>,
     set_window_dims_counter: usize,
 }
@@ -232,6 +233,15 @@ impl super::XConnection for FakeXConnection {
             "Unknown window: {window:?}"
         );
         self.focused_window = window.into();
+    }
+
+    #[track_caller]
+    fn send_take_focus(&mut self, window: x::Window) {
+        assert!(
+            self.windows.contains_key(&window),
+            "Unknown window: {window:?}"
+        );
+        self.send_take_focus_window = window.into();
     }
 
     fn raise_to_top(&mut self, window: Window) {
@@ -859,6 +869,55 @@ impl TestFixture<FakeXConnection> {
     }
 
     #[track_caller]
+    fn setup_popup_focus_case(
+        &mut self,
+        comp: &Compositor,
+        override_redirect: bool,
+        accepts_input: bool,
+        take_focus: bool,
+    ) -> (Window, Window) {
+        let win_toplevel = Window::new(1);
+        self.create_toplevel(comp, win_toplevel);
+
+        let win_popup = Window::new(2);
+        let (buffer, surface) = comp.create_surface();
+        let data = WindowData {
+            mapped: true,
+            dims: WindowDims {
+                x: 10,
+                y: 20,
+                width: 100,
+                height: 50,
+            },
+            fullscreen: false,
+        };
+        self.new_window(win_popup, override_redirect, data);
+        if !override_redirect {
+            self.satellite
+                .set_window_role(win_popup, crate::xstate::WindowRole::Popup);
+        }
+
+        self.satellite.set_win_hints(
+            win_popup,
+            super::WmHints {
+                window_group: None,
+                accepts_input,
+            },
+        );
+        if take_focus {
+            self.satellite.set_take_focus(win_popup, true);
+        }
+        self.map_window(comp, win_popup, &surface.obj, &buffer);
+        self.run();
+
+        let popup_id = self.check_new_surface();
+        self.testwl.configure_popup(popup_id);
+        self.run();
+
+        (win_toplevel, win_popup)
+    }
+
+    #[track_caller]
     fn assert_window_dimensions(
         &self,
         window: x::Window,
@@ -1342,7 +1401,7 @@ fn window_group_properties() {
         win,
         super::WmHints {
             window_group: Some(prop_win),
-            acquire_input_via_wm: false,
+            accepts_input: false,
         },
     );
     f.satellite.map_window(win);
@@ -1647,103 +1706,51 @@ fn override_redirect_choose_hover_window() {
 }
 
 #[test]
-fn popup_no_focus_without_input_hint() {
-    let (mut f, comp) = TestFixture::new_with_compositor();
+fn popup_override_redirect_never_focused_nor_offered() {
+    for accepts_input in [true, false] {
+        for take_focus in [false, true] {
+            let (mut f, comp) = TestFixture::new_with_compositor();
 
-    let win_toplevel = Window::new(1);
-    let (_, toplevel_id) = f.create_toplevel(&comp, win_toplevel);
+            let (win_toplevel, _) =
+                f.setup_popup_focus_case(&comp, true, accepts_input, take_focus);
+            assert_eq!(
+                f.connection().focused_window,
+                Some(win_toplevel),
+                "accepts_input={accepts_input:?} take_focus={take_focus}"
+            );
+            assert_eq!(
+                f.connection().send_take_focus_window,
+                None,
+                "accepts_input={accepts_input:?} take_focus={take_focus}"
+            );
+        }
+    }
+}
 
-    // A popup without acquire_input_via_wm should not receive focus.
-    let win_popup = Window::new(2);
-    f.create_popup(
-        &comp,
-        PopupBuilder::new(win_popup, win_toplevel, toplevel_id),
-    );
-    assert_eq!(f.connection().focused_window, Some(win_toplevel));
+#[test]
+fn popup_send_take_focus_when_advertised() {
+    for accepts_input in [true, false] {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+
+        let (win_toplevel, win_popup) = f.setup_popup_focus_case(&comp, false, accepts_input, true);
+        assert_eq!(f.connection().focused_window, Some(win_toplevel));
+        assert_eq!(f.connection().send_take_focus_window, Some(win_popup));
+    }
 }
 
 #[test]
 fn popup_focus_on_map_with_input_hint() {
     let (mut f, comp) = TestFixture::new_with_compositor();
 
-    let win_toplevel = Window::new(1);
-    let (_, toplevel_id) = f.create_toplevel(&comp, win_toplevel);
-
-    // A popup with acquire_input_via_wm should receive X11 keyboard focus
-    // at map time, matching what a real X11 WM does for windows with
-    // WM_HINTS input=True.
-    let win_popup = Window::new(2);
-    let (buffer, surface) = comp.create_surface();
-    let dims = WindowDims {
-        x: 10,
-        y: 20,
-        width: 100,
-        height: 50,
-    };
-    let data = WindowData {
-        mapped: true,
-        dims,
-        fullscreen: false,
-    };
-    f.new_window(win_popup, true, data);
-    f.satellite.set_win_hints(
-        win_popup,
-        super::WmHints {
-            window_group: None,
-            acquire_input_via_wm: true,
-        },
-    );
-    f.map_window(&comp, win_popup, &surface.obj, &buffer);
-    f.run();
-
-    let popup_id = f.check_new_surface();
-    assert_ne!(popup_id, toplevel_id);
-
-    f.testwl.configure_popup(popup_id);
-    f.run();
-
-    // Focus should have been given directly to the popup at map time.
+    let (_, win_popup) = f.setup_popup_focus_case(&comp, false, true, false);
     assert_eq!(f.connection().focused_window, Some(win_popup));
 }
 
 #[test]
-fn popup_no_focus_input_hint_wm_take_focus() {
+fn popup_no_focus_without_input_hint() {
     let (mut f, comp) = TestFixture::new_with_compositor();
 
-    let win_toplevel = Window::new(1);
-    let (_, toplevel_id) = f.create_toplevel(&comp, win_toplevel);
-
-    let win_popup = Window::new(2);
-    let (buffer, surface) = comp.create_surface();
-    let dims = WindowDims {
-        x: 10,
-        y: 20,
-        width: 100,
-        height: 50,
-    };
-    let data = WindowData {
-        mapped: true,
-        dims,
-        fullscreen: false,
-    };
-    f.new_window(win_popup, true, data);
-    f.satellite.set_win_hints(
-        win_popup,
-        super::WmHints {
-            window_group: None,
-            acquire_input_via_wm: true,
-        },
-    );
-    f.satellite.set_take_focus(win_popup, true);
-    f.map_window(&comp, win_popup, &surface.obj, &buffer);
-    f.run();
-
-    let popup_id = f.check_new_surface();
-    assert_ne!(popup_id, toplevel_id);
-
-    f.testwl.configure_popup(popup_id);
-    f.run();
-
+    let (win_toplevel, _) = f.setup_popup_focus_case(&comp, false, false, false);
     assert_eq!(f.connection().focused_window, Some(win_toplevel));
 }
 
@@ -3083,16 +3090,11 @@ fn client_side_decorations() {
     f.testwl.configure_toplevel(id, 100, 100, vec![]);
     f.run();
 
-    let data = f.connection().window(window);
-    assert_eq!(
-        data.dims,
-        WindowDims {
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 75
-        }
-    );
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let viewport = data.viewport.as_ref().unwrap();
+    assert_eq!(viewport.width, 100);
+    assert_eq!(viewport.height, 75);
+
     let subsurface_id = f.testwl.last_created_surface_id().unwrap();
     assert_ne!(subsurface_id, id);
     let data = f.testwl.get_surface_data(subsurface_id).unwrap();
@@ -3107,16 +3109,11 @@ fn client_side_decorations() {
     f.testwl
         .configure_toplevel(id, 100, 100, vec![xdg_toplevel::State::Fullscreen]);
     f.run();
-    let data = f.connection().window(window);
-    assert_eq!(
-        data.dims,
-        WindowDims {
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 100
-        }
-    );
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let viewport = data.viewport.as_ref().unwrap();
+    assert_eq!(viewport.width, 100);
+    assert_eq!(viewport.height, 100);
+
     let data = f.testwl.get_surface_data(subsurface_id).unwrap();
     assert!(data.buffer.is_none());
 
@@ -3132,16 +3129,10 @@ fn client_side_decorations() {
     f.testwl.configure_toplevel(id, 100, 100, vec![]);
     f.run();
 
-    let data = f.connection().window(window);
-    assert_eq!(
-        data.dims,
-        WindowDims {
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 100
-        }
-    );
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let viewport = data.viewport.as_ref().unwrap();
+    assert_eq!(viewport.width, 100);
+    assert_eq!(viewport.height, 100);
     assert!(f.testwl.get_surface_data(subsurface_id).is_none());
     assert!(!subsurface.is_alive());
 }
@@ -3205,16 +3196,11 @@ fn resize_decorations_on_reconfigure() {
     f.testwl.configure_toplevel(id, 100, 100, vec![]);
     f.run();
 
-    let data = f.connection().window(window);
-    assert_eq!(
-        data.dims,
-        WindowDims {
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 75
-        }
-    );
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let viewport = data.viewport.as_ref().unwrap();
+    assert_eq!(viewport.width, 100);
+    assert_eq!(viewport.height, 75);
+
     let subsurface_id = f.testwl.last_created_surface_id().unwrap();
     assert_ne!(subsurface_id, id);
     let data = f.testwl.get_surface_data(subsurface_id).unwrap();
@@ -3227,6 +3213,15 @@ fn resize_decorations_on_reconfigure() {
         "surface was not a subsurface: {:?}",
         data.role
     );
+
+    // Weston seems to do this when a window is deactivated. Since the stored window data's height
+    // is used as a fallback in this case, do not reapply the height reduction from the titlebar.
+    f.testwl.configure_toplevel(id, 0, 0, vec![]);
+    f.run();
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let viewport = data.viewport.as_ref().unwrap();
+    assert_eq!(viewport.width, 100);
+    assert_eq!(viewport.height, 75);
 
     let dims = WindowDims {
         x: 0,
@@ -3258,6 +3253,41 @@ fn decorations_with_title_on_thin_window() {
     // Asserts no panics occur with not enough space for even a single character of the title
     f.satellite
         .set_win_title(window, WmName::WmName("window".into()));
+}
+
+#[test]
+fn decorations_max_height_int_max() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = Window::new(1);
+    let (_, id) = f.create_toplevel(&compositor, window);
+    f.testwl
+        .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
+    f.testwl.configure_toplevel(id, 1, 100, vec![]);
+    f.run();
+
+    // When calculating the Wayland max size from the X size hints, the titlebar height is added to
+    // the height hint, but obviously this should not overflow the size hint.
+    f.satellite.set_size_hints(
+        window,
+        super::WmNormalHints {
+            min_size: None,
+            max_size: Some(WinSize {
+                width: i32::MAX,
+                height: i32::MAX,
+            }),
+        },
+    );
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let toplevel = data.toplevel();
+    assert_eq!(
+        toplevel.max_size,
+        Some(testwl::Vec2 {
+            x: i32::MAX,
+            y: i32::MAX
+        })
+    );
 }
 
 /// See Pointer::handle_event for an explanation.

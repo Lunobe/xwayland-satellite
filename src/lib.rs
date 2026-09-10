@@ -20,6 +20,7 @@ pub trait XConnection: Sized + 'static {
     fn set_window_dims(&mut self, window: x::Window, dims: PendingSurfaceState) -> bool;
     fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool);
     fn focus_window(&mut self, window: x::Window, output_name: Option<String>);
+    fn send_take_focus(&mut self, window: x::Window);
     fn close_window(&mut self, window: x::Window);
     fn unmap_window(&mut self, window: x::Window);
     fn raise_to_top(&mut self, window: x::Window);
@@ -110,6 +111,8 @@ pub fn main(mut data: impl RunData) -> Option<()> {
 
     // Now that Xwayland spawned and got the listenfds, we can close them here.
     drop(fds);
+    // Close our copy of the WM socket so Xwayland exiting produces EOF on xsock_wl.
+    drop(xsock_xwl);
 
     let xwl_pid = xwayland.id();
 

@@ -223,17 +223,21 @@ impl Fixture {
         window: x::Window,
         surface: testwl::SurfaceId,
     ) {
-        self.configure_and_verify_new_toplevel_with_size(connection, window, surface, 100, 100);
+        self.configure_and_verify_new_toplevel_with_scale(connection, window, surface, 1.0);
     }
 
-    fn configure_and_verify_new_toplevel_with_size(
+    fn configure_and_verify_new_toplevel_with_scale(
         &mut self,
         connection: &mut Connection,
         window: x::Window,
         surface: testwl::SurfaceId,
-        width: u16,
-        height: u16,
+        scale: f32,
     ) {
+        let unscaled_geo = connection.get_reply(&x::GetGeometry {
+            drawable: x::Drawable::Window(window),
+        });
+        let (u_width, u_height) = (unscaled_geo.width(), unscaled_geo.height());
+
         let data = self.testwl.get_surface_data(surface).unwrap();
         assert!(
             matches!(data.role, Some(testwl::SurfaceRole::Toplevel(_))),
@@ -241,18 +245,22 @@ impl Fixture {
             data.role
         );
 
-        self.testwl
-            .configure_toplevel(surface, 100, 100, vec![xdg_toplevel::State::Activated]);
+        self.testwl.configure_toplevel(
+            surface,
+            u_width as _,
+            u_height as _,
+            vec![xdg_toplevel::State::Activated],
+        );
         self.testwl.focus_toplevel(surface);
         self.wait_and_dispatch();
+
         let geometry = connection.get_reply(&x::GetGeometry {
             drawable: x::Drawable::Window(window),
         });
-
         assert_eq!(geometry.x(), 0);
         assert_eq!(geometry.y(), 0);
-        assert_eq!(geometry.width(), width);
-        assert_eq!(geometry.height(), height);
+        assert_eq!(geometry.width(), (u_width as f32 * scale) as _);
+        assert_eq!(geometry.height(), (u_height as f32 * scale) as _);
     }
 
     #[track_caller]
@@ -261,16 +269,15 @@ impl Fixture {
         connection: &mut Connection,
         window: x::Window,
     ) -> testwl::SurfaceId {
-        self.map_as_toplevel_with_size(connection, window, 100, 100)
+        self.map_as_toplevel_with_scale(connection, window, 1.0)
     }
 
     #[track_caller]
-    fn map_as_toplevel_with_size(
+    fn map_as_toplevel_with_scale(
         &mut self,
         connection: &mut Connection,
         window: x::Window,
-        width: u16,
-        height: u16,
+        scale: f32,
     ) -> testwl::SurfaceId {
         connection.map_window(window);
         self.wait_and_dispatch();
@@ -278,7 +285,7 @@ impl Fixture {
             .testwl
             .last_created_surface_id()
             .expect("No surface created");
-        self.configure_and_verify_new_toplevel_with_size(connection, window, surface, width, height);
+        self.configure_and_verify_new_toplevel_with_scale(connection, window, surface, scale);
         surface
     }
 
@@ -374,6 +381,7 @@ xcb::atoms_struct! {
         incr => b"INCR",
         xsettings => b"_XSETTINGS_S0",
         xsettings_setting => b"_XSETTINGS_SETTINGS",
+        resource_manager => b"RESOURCE_MANAGER",
         moveresize => b"_NET_WM_MOVERESIZE",
     }
 }
@@ -693,6 +701,19 @@ impl Connection {
             serial,
             data: settings,
         }
+    }
+
+    fn get_resource_manager(&self) -> Vec<u8> {
+        self.get_reply(&x::GetProperty {
+            delete: false,
+            window: self.root,
+            property: self.atoms.resource_manager,
+            r#type: x::ATOM_STRING,
+            long_offset: 0,
+            long_length: u32::MAX,
+        })
+        .value()
+        .to_vec()
     }
 }
 
@@ -2008,7 +2029,7 @@ fn forced_1x_scale_consistent_x11_size() {
 
     let mut conn = Connection::new(&f.display);
     let window = conn.new_window(conn.root, 0, 0, 200, 200, false);
-    let surface = f.map_as_toplevel_with_size(&mut conn, window, 200, 200);
+    let surface = f.map_as_toplevel_with_scale(&mut conn, window, 2.0);
     f.testwl.move_surface_to_output(surface, &output);
     f.testwl.move_pointer_to(surface, 30.0, 40.0);
     f.wait_and_dispatch();
@@ -2169,6 +2190,46 @@ fn xsettings_fractional_scale() {
     assert_eq!(
         settings.data["Gdk/UnscaledDPI"].value,
         (2.5 / 2.0 * 96_f64 * 1024_f64).round() as i32
+    );
+}
+
+#[test]
+fn resource_manager_scale() {
+    let mut f = Fixture::new_preset(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let mut connection = Connection::new(&f.display);
+    f.testwl.enable_xdg_output_manager();
+    let output = f.create_output(0, 0);
+
+    assert_eq!(connection.get_resource_manager(), b"Xft.dpi:\t96\n");
+    connection.set_property(
+        connection.root,
+        x::ATOM_STRING,
+        connection.atoms.resource_manager,
+        b"Xcursor.theme:\tAdwaita\nXft.dpi:\t96\n",
+    );
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    let fractional = data.fractional.as_ref().unwrap();
+
+    fractional.preferred_scale(180); // 1.5 scale
+    f.testwl.move_surface_to_output(surface, &output);
+    f.wait_and_dispatch();
+    assert_eq!(
+        connection.get_resource_manager(),
+        b"Xcursor.theme:\tAdwaita\nXft.dpi:\t144\n"
+    );
+
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    let fractional = data.fractional.as_ref().unwrap();
+    fractional.preferred_scale(300); // 2.5 scale
+    f.wait_and_dispatch();
+    assert_eq!(
+        connection.get_resource_manager(),
+        b"Xcursor.theme:\tAdwaita\nXft.dpi:\t240\n"
     );
 }
 
